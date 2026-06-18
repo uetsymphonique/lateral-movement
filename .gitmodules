@@ -1,0 +1,3 @@
+[submodule "go-thehash/go-smb"]
+	path = go-thehash/go-smb
+	url = https://github.com/jfjallid/go-smb
