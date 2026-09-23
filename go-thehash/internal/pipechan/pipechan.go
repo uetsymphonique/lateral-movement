@@ -182,9 +182,27 @@ func establishChannel(f *smb.File) (send, recv *frameCipher, err error) {
 	return send, recv, nil
 }
 
+// readFull reads exactly len(buf) bytes from the SMB pipe, issuing as many
+// SMB2 READ requests as needed. Mirrors smbpipe-agent's pipeio.ReadFull —
+// a single ReadFile may return fewer bytes than requested.
+func readFull(f *smb.File, buf []byte) error {
+	total := 0
+	for total < len(buf) {
+		n, err := f.ReadFile(buf[total:], 0)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errors.New("unexpected end of pipe stream")
+		}
+		total += n
+	}
+	return nil
+}
+
 func readEncryptedMsg(f *smb.File, c *frameCipher) ([]byte, error) {
 	header := make([]byte, 4)
-	if _, err := f.ReadFile(header, 0); err != nil {
+	if err := readFull(f, header); err != nil {
 		return nil, err
 	}
 	length := binary.LittleEndian.Uint32(header)
@@ -192,7 +210,7 @@ func readEncryptedMsg(f *smb.File, c *frameCipher) ([]byte, error) {
 		return nil, fmt.Errorf("invalid frame length: %d", length)
 	}
 	body := make([]byte, length)
-	if _, err := f.ReadFile(body, 0); err != nil {
+	if err := readFull(f, body); err != nil {
 		return nil, err
 	}
 	return c.open(header, body)

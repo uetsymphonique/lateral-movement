@@ -69,6 +69,14 @@ func ListDir(session *smb.Connection, share, dir, pattern string, recurse bool) 
 	if pattern == "" {
 		pattern = "*"
 	}
+	dir = normalizeShareDir(dir)
+	// ListDirectory/ListRecurseDirectory assume an existing tree connect
+	// (go-smb session.go:1423); unlike RetrieveFile/PutFile they do not
+	// connect themselves, so a missing TreeID yields STATUS_NETWORK_NAME_DELETED.
+	if err := session.TreeConnect(share); err != nil {
+		return fmt.Errorf("TreeConnect \\\\%s: %w", share, err)
+	}
+	defer session.TreeDisconnect(share)
 	var files []smb.SharedFile
 	var err error
 	if recurse {
@@ -77,9 +85,9 @@ func ListDir(session *smb.Connection, share, dir, pattern string, recurse bool) 
 		files, err = session.ListDirectory(share, dir, pattern)
 	}
 	if err != nil {
-		return fmt.Errorf("ListDirectory \\\\%s\\%s\\%s: %w", share, share, dir, err)
+		return fmt.Errorf("ListDirectory \\\\%s\\%s: %w", share, dir, err)
 	}
-	fmt.Printf("[+] %d entries in \\\\%s\\%s\\%s\n\n", len(files), share, share, dir)
+	fmt.Printf("[+] %d entries in \\\\%s\\%s\n\n", len(files), share, dir)
 	fmt.Printf("%-6s %-20s %12s  %s\n", "Type", "Modified", "Size", "Name")
 	fmt.Println(strings.Repeat("-", 60))
 	for _, f := range files {
@@ -100,4 +108,16 @@ func ListDir(session *smb.Connection, share, dir, pattern string, recurse bool) 
 		fmt.Printf("%-6s %-20s %12s  %s%s\n", kind, mtime, size, f.Name, hidden)
 	}
 	return nil
+}
+
+// normalizeShareDir maps share-root shorthand ("", ".", "/", "\") to "" (the
+// share root) and otherwise normalizes separators to backslashes without a
+// leading or trailing one. go-smb sends an empty Create path to open the root.
+func normalizeShareDir(dir string) string {
+	d := strings.ReplaceAll(dir, "/", "\\")
+	d = strings.Trim(d, "\\")
+	if d == "." {
+		return ""
+	}
+	return d
 }
