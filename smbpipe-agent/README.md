@@ -44,7 +44,7 @@ sequenceDiagram
     Note over Tg, Op: agent keeps listening, terminated externally (taskkill or reboot)
 ```
 
-- **No SCM handler:** the agent is a regular console process, not a `windows/svc` service. Even if launched via a Windows service, SCM kills only the *service entry* after the ~30 s `SetServiceStatus` timeout — the process itself keeps running and serving the pipe. No service lifecycle management is implemented or needed.
+- **No SCM handler:** the agent is a regular console process, not a `windows/svc` service. Launch it with a process-creation primitive (`go-thehash exec-wmi` / WMI), **not** `go-thehash exec`. `exec` registers the agent binary as a transient service via MS-SCMR; because the agent never calls `StartServiceCtrlDispatcher`/`SetServiceStatus`, SCM returns `ERROR_SERVICE_REQUEST_TIMEOUT` (1053) after ~30 s and **terminates the service process** — i.e. the agent itself dies (observed in the lab: agent spawns, then disappears). If a service entry is ever required for scoring, point `ImagePath` at a detaching wrapper instead (`cmd.exe /c start "" C:\Windows\Temp\smbpipe-agent.exe`) so SCM kills only the wrapper and the detached child survives. No service lifecycle management is implemented or needed.
 - **Sequential by design:** one connection at a time, matching the one-command-per-invocation client. Per-connection errors are logged and swallowed; a dead listener is recreated by an internal 1-second retry loop rather than exiting.
 - **Termination is external** (`taskkill`, service stop, reboot) — there is no signal handling.
 
@@ -123,3 +123,4 @@ One command per connection; the client exits after printing the response.
 
 - Build: `Build.md` · Sliver design/stealth comparison: `comparison-sliver.md`
 - Client implementation: `../go-thehash/` (`pipe` subcommand)
+- Client code flow & ATT&CK mapping (covers this agent's channel side): `../go-thehash/Flow.md` — C2 over non-app-layer protocol T1095, Encrypted Channel T1573.002 (ECDH handshake) / T1573.001 (AES-GCM frames); masquerading pipe name T1036.005

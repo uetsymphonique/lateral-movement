@@ -131,6 +131,11 @@ func handleConn(sc *securechan.Conn) error {
 	if err := sc.Write(output); err != nil {
 		return fmt.Errorf("write output: %w", err)
 	}
+	// Block until the client closes its pipe handle (the SMB session teardown
+	// propagates as a broken-pipe / disconnect error here). Without this wait,
+	// DisconnectNamedPipe in serveOne races the SMB transport delivering the
+	// response to the remote client.
+	sc.Read()
 	return nil
 }
 
